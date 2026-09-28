@@ -26,6 +26,7 @@ import {
   CheckCircle2,
   AlertCircle,
 } from "lucide-react";
+import QrScannerModal from "@/components/QrScannerModal";
 
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -86,6 +87,9 @@ export default function IntentPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
+
+  // ── QR Scanner modal ──
+  const [isQrOpen, setIsQrOpen] = useState(false);
 
   // ─────────────────────────────────────────────────────────────
   // Handlers
@@ -164,10 +168,9 @@ export default function IntentPage() {
 
       setSavedOk(true);
 
-      // Brief success flash, then redirect to GPay deep link
+      // Brief success flash, then open QR scanner so user scans merchant QR
       setTimeout(() => {
-        const upiUrl = `${GPay_UPI}&am=${parsedAmount}`;
-        window.location.href = upiUrl;
+        setIsQrOpen(true);
       }, 800);
     } catch (err: unknown) {
       console.error("[IntentPage] Save failed:", err);
@@ -443,7 +446,7 @@ export default function IntentPage() {
             </CardContent>
 
             <CardFooter className="flex-col gap-3 pt-4">
-              {/* PRIMARY CTA — Save & Pay */}
+              {/* PRIMARY CTA — Save intent, then open QR scanner to pay */}
               <Button
                 id="save-and-pay-btn"
                 type="submit"
@@ -459,12 +462,12 @@ export default function IntentPage() {
                 ) : savedOk ? (
                   <>
                     <CheckCircle2 className="mr-2 h-4 w-4" />
-                    Saved! Opening GPay…
+                    Saved! Scan to Pay…
                   </>
                 ) : (
                   <>
                     <IndianRupee className="mr-1 h-4 w-4" />
-                    Save &amp; Pay via GPay
+                    Save &amp; Scan to Pay
                   </>
                 )}
               </Button>
@@ -488,6 +491,17 @@ export default function IntentPage() {
           </p>
         </div>
       </main>
+
+      {/* QR Scanner Modal — mounts on top of everything after save succeeds */}
+      <QrScannerModal
+        amount={parseFloat(amount) || 0}
+        isOpen={isQrOpen}
+        onClose={() => {
+          setIsQrOpen(false);
+          // Navigate to dashboard after payment flow completes
+          router.push("/dashboard");
+        }}
+      />
     </div>
   );
 }
