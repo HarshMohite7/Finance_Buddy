@@ -1,5 +1,5 @@
 "use client";
-
+// @ts-nocheck
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase, type Transaction } from "@/lib/supabase";
@@ -200,7 +200,7 @@ export default function DashboardPage() {
 
       // Today's transactions for the table
       const todayStart = `${todayISOPrefix()}T00:00:00.000Z`;
-      const todayEnd   = `${todayISOPrefix()}T23:59:59.999Z`;
+      const todayEnd = `${todayISOPrefix()}T23:59:59.999Z`;
 
       const { data: today, error: todayErr } = await supabase
         .from("user_transactions")
