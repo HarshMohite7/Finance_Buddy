@@ -557,9 +557,11 @@ export default function DashboardPage() {
                         outerRadius={100}
                         paddingAngle={3}
                         dataKey="value"
-                        label={({ name, percent }) =>
-                          `${name} ${(percent * 100).toFixed(0)}%`
-                        }
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        label={((props: Record<string, unknown>) => {
+                          const pct = typeof props.percent === "number" ? props.percent : 0;
+                          return `${props.name ?? ""} ${(pct * 100).toFixed(0)}%`;
+                        }) as any}
                         labelLine={false}
                       >
                         {pieData.map((entry) => (
@@ -570,7 +572,10 @@ export default function DashboardPage() {
                         ))}
                       </Pie>
                       <Tooltip
-                        formatter={(value: number) => formatCurrency(value)}
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        formatter={((value: unknown) =>
+                          formatCurrency(typeof value === "number" ? value : parseFloat(String(value)))
+                        ) as any}
                         contentStyle={{ borderRadius: 8, fontSize: 12 }}
                       />
                       <Legend
@@ -607,7 +612,7 @@ export default function DashboardPage() {
                         tickLine={false}
                       />
                       <YAxis
-                        tickFormatter={(v) => `₹${v}`}
+                        tickFormatter={(v: number | string) => `₹${v}`}
                         tick={{ fontSize: 11, fill: "#71717a" }}
                         axisLine={false}
                         tickLine={false}
