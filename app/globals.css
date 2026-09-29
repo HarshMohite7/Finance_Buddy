@@ -128,3 +128,14 @@
     @apply font-sans;
   }
 }
+
+/* ── html5-qrcode: hide the default camera-selection UI ────────────────── */
+/* Hides the "Select Camera" dropdown section                               */
+#qr-reader__dashboard_section_csr {
+  display: none !important;
+}
+
+/* Hides the "Switch Camera" swap link (appears on multi-camera devices)    */
+#qr-reader__dashboard_section_swaplink {
+  display: none !important;
+}
