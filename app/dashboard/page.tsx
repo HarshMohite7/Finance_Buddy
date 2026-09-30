@@ -2,7 +2,8 @@
 // @ts-nocheck
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase, type Transaction } from "@/lib/supabase";
+import { createClient } from "@/utils/supabase/client";
+import { type Transaction } from "@/lib/supabase";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -136,6 +137,7 @@ function CustomBarTooltip({ active, payload, label }: {
 // Main Component
 // ─────────────────────────────────────────────────────────────
 export default function DashboardPage() {
+  const supabase = createClient();
   const router = useRouter();
 
   // ── Auth ──

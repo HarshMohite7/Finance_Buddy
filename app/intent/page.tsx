@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase";
+import { createClient } from "@/utils/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -49,6 +49,7 @@ const GPay_UPI = "upi://pay?pa=mohitevharsh777@oksbi&pn=Harsh";
 // Component
 // ─────────────────────────────────────────────────────────────
 export default function IntentPage() {
+  const supabase = createClient();
   const router = useRouter();
 
   // ── Auth guard ──
