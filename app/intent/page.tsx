@@ -58,13 +58,13 @@ export default function IntentPage() {
   const [authLoading, setAuthLoading] = useState(true);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!session) {
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!user) {
         router.replace("/");
         return;
       }
-      setUserId(session.user.id);
-      setUserEmail(session.user.email ?? null);
+      setUserId(user.id);
+      setUserEmail(user.email ?? null);
       setAuthLoading(false);
     });
   }, [router]);

@@ -172,13 +172,13 @@ export default function DashboardPage() {
   // Auth guard + initial data load
   // ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!session) {
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!user) {
         router.replace("/");
         return;
       }
-      setUserId(session.user.id);
-      setUserEmail(session.user.email ?? null);
+      setUserId(user.id);
+      setUserEmail(user.email ?? null);
       setAuthLoading(false);
     });
   }, [router]);
@@ -299,8 +299,14 @@ export default function DashboardPage() {
     try {
       // ── Grab the live session so we can forward the JWT ──────────────────
       const {
-        data: { session },
-      } = await supabase.auth.getSession();
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        router.replace("/");
+        return;
+      }
+      // Re-fetch a fresh session token for the Authorization header
+      const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
         router.replace("/");
         return;
