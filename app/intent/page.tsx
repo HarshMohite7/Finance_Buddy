@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
+import QrScannerModal from "@/components/QrScannerModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -42,9 +43,6 @@ const CATEGORIES = [
 
 type Category = (typeof CATEGORIES)[number];
 
-// UPI deep-link as per PRD
-const GPay_UPI = "upi://pay?pa=mohitevharsh777@oksbi&pn=Harsh";
-
 // ─────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────
@@ -82,6 +80,10 @@ export default function IntentPage() {
   // category: null = not yet set | string = set (either by Groq or manual)
   const [category, setCategory] = useState<Category | null>(null);
   const [manualCategory, setManualCategory] = useState<Category>(CATEGORIES[0]);
+
+  // ── Scanner state ──
+  const [showScanner, setShowScanner] = useState(false);
+  const [savedAmount, setSavedAmount] = useState(0);
 
   // ── Submission state ──
   const [saving, setSaving] = useState(false);
@@ -132,10 +134,12 @@ export default function IntentPage() {
     }
   }
 
-  /** Save transaction to Supabase, then redirect to GPay */
-  async function handleSaveAndPay(e: React.FormEvent) {
+  // Save to DB then open the QR scanner so the UPI redirect only fires
+  // after the user scans a real merchant code — not blindly on button click.
+  async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setSaveError(null);
+    setSavedOk(false);
 
     const parsedAmount = parseFloat(amount);
     if (!parsedAmount || parsedAmount <= 0) {
@@ -164,12 +168,10 @@ export default function IntentPage() {
       if (dbError) throw dbError;
 
       setSavedOk(true);
+      setSavedAmount(parsedAmount);
 
-      // Brief success flash, then redirect to GPay deep link
-      setTimeout(() => {
-        const upiUrl = `${GPay_UPI}&am=${parsedAmount}`;
-        window.location.href = upiUrl;
-      }, 800);
+      // Open the QR scanner — UPI deep-link fires only after a successful scan
+      setTimeout(() => setShowScanner(true), 600);
     } catch (err: unknown) {
       console.error("[IntentPage] Save failed:", err);
       setSaveError(err instanceof Error ? err.message : "Failed to save. Please try again.");
@@ -256,7 +258,7 @@ export default function IntentPage() {
             </CardHeader>
 
             <CardContent className="pt-5">
-              <form id="intent-form" onSubmit={handleSaveAndPay} className="space-y-5">
+              <form id="intent-form" onSubmit={handleSave} className="space-y-5">
                 {/* ── Amount ── */}
                 <div className="space-y-1.5">
                   <Label htmlFor="amount-input" className="flex items-center gap-1.5 text-xs font-semibold text-zinc-700 uppercase tracking-wide">
@@ -460,12 +462,12 @@ export default function IntentPage() {
                 ) : savedOk ? (
                   <>
                     <CheckCircle2 className="mr-2 h-4 w-4" />
-                    Saved! Opening GPay…
+                    Saved! Opening Scanner…
                   </>
                 ) : (
                   <>
                     <IndianRupee className="mr-1 h-4 w-4" />
-                    Save &amp; Pay via GPay
+                    Save &amp; Scan QR to Pay
                   </>
                 )}
               </Button>
@@ -489,6 +491,23 @@ export default function IntentPage() {
           </p>
         </div>
       </main>
+
+      {/* ── QR Scanner Modal — opens after save, UPI fires only on scan ── */}
+      <QrScannerModal
+        amount={savedAmount}
+        isOpen={showScanner}
+        onClose={() => {
+          setShowScanner(false);
+          // Reset form after scanner is dismissed so user can log another intent
+          setAmount("");
+          setNote("");
+          setCategory(null);
+          setPreviewUrl(null);
+          setVisionFailed(false);
+          setSavedOk(false);
+          setSavedAmount(0);
+        }}
+      />
     </div>
   );
 }
