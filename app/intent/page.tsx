@@ -94,6 +94,7 @@ export default function IntentPage() {
   // ── Scanner state ──
   const [showScanner, setShowScanner] = useState(false);
   const [savedAmount, setSavedAmount] = useState(0);
+  const [qrSaving, setQrSaving] = useState(false); // true while auto-saving after QR scan
 
   // ── Submission state ──
   const [saving, setSaving] = useState(false);
@@ -178,8 +179,12 @@ export default function IntentPage() {
     }
   }
 
-  /** Called when the QR scanner successfully reads a UPI code */
-  function handleQrScanSuccess(scannedUrl: string) {
+  /**
+   * Called when the QR scanner successfully reads a UPI code.
+   * Immediately saves the transaction to DB and fires the UPI deep-link —
+   * no extra button press needed.
+   */
+  async function handleQrScanSuccess(scannedUrl: string) {
     const parsed = parseUpiQrCode(scannedUrl);
     if (!parsed) {
       setSaveError("The scanned QR code is not a valid UPI payment code.");
@@ -187,11 +192,77 @@ export default function IntentPage() {
       return;
     }
 
-    // Auto-fill the UPI fields from the QR code
-    setUpiId(parsed.pa);
-    setPayeeName(parsed.pn);
-    setUpiMode("manual"); // Switch to manual view so user sees the filled fields
-    setShowScanner(false);
+    const parsedAmount = parseFloat(amount);
+    if (!parsedAmount || parsedAmount <= 0) {
+      // Amount not entered yet — fill UPI fields and let user enter amount then submit
+      setUpiId(parsed.pa);
+      setPayeeName(parsed.pn);
+      setUpiMode("manual");
+      setShowScanner(false);
+      setSaveError("Please enter an amount above, then tap Save & Pay.");
+      return;
+    }
+
+    if (!userId) {
+      setSaveError("Session expired. Please log in again.");
+      router.replace("/");
+      return;
+    }
+
+    const finalCategory: Category = visionFailed
+      ? manualCategory
+      : category ?? manualCategory;
+
+    // Show loading overlay inside the scanner modal
+    setQrSaving(true);
+
+    try {
+      const { data: insertedRows, error: dbError } = await supabase
+        .from("user_transactions")
+        .insert({
+          user_id: userId,
+          amount: parsedAmount,
+          user_note: note.trim() || null,
+          category: finalCategory,
+          payee_upi_id: parsed.pa,
+          status: "PENDING",
+        })
+        .select("id")
+        .single();
+
+      if (dbError) throw dbError;
+
+      setPendingTxnId(insertedRows.id);
+      setPendingPayeeUpi(parsed.pa);
+      setPendingAmount(parsedAmount);
+
+      // Update visible UPI fields so the form reflects the scanned values
+      setUpiId(parsed.pa);
+      setPayeeName(parsed.pn);
+      setUpiMode("manual");
+      setSavedOk(true);
+      setSavedAmount(parsedAmount);
+
+      const deepLink = buildUpiDeepLink(parsed.pa, parsedAmount, parsed.pn || undefined);
+      if (deepLink) {
+        paymentInitiatedRef.current = true;
+        setTimeout(() => {
+          setShowScanner(false);
+          window.location.href = deepLink;
+        }, 700);
+      } else {
+        setShowScanner(false);
+        setSaveError("Failed to construct UPI link. Please check the QR code.");
+      }
+    } catch (err: unknown) {
+      console.error("[IntentPage] QR save failed:", err);
+      setShowScanner(false);
+      setSaveError(
+        err instanceof Error ? err.message : "Failed to save. Please try again."
+      );
+    } finally {
+      setQrSaving(false);
+    }
   }
 
   // Save to DB with status PENDING, then fire UPI deep-link
@@ -728,7 +799,8 @@ export default function IntentPage() {
         <QrScannerModal
           amount={parseFloat(amount) || 0}
           isOpen={showScanner}
-          onClose={() => setShowScanner(false)}
+          isSaving={qrSaving}
+          onClose={() => { if (!qrSaving) setShowScanner(false); }}
           onScanSuccess={handleQrScanSuccess}
         />
       )}

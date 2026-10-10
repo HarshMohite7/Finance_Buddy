@@ -2,18 +2,23 @@
 
 import { useEffect, useRef } from "react";
 import { Html5QrcodeScanner, Html5QrcodeScannerState } from "html5-qrcode";
+import { Loader2, CheckCircle2 } from "lucide-react";
 
 interface QrScannerModalProps {
   /** The transaction amount to display in the UI */
   amount: number;
   /** Controls visibility — parent must manage this */
   isOpen: boolean;
-  /** Called when the user dismisses the modal */
+  /**
+   * True while the parent is saving to DB + firing UPI deep-link.
+   * When true the scanner is replaced with a loading overlay.
+   */
+  isSaving?: boolean;
+  /** Called when the user dismisses the modal (blocked while isSaving) */
   onClose: () => void;
   /**
-   * Called when a valid QR code is scanned.
-   * The parent handles UPI parsing and deep-link construction.
-   * If not provided, falls back to legacy behavior (direct redirect).
+   * Called with the raw decoded QR string when a valid code is scanned.
+   * Parent handles UPI parsing, DB save, and UPI deep-link.
    */
   onScanSuccess?: (decodedText: string) => void;
 }
@@ -21,22 +26,22 @@ interface QrScannerModalProps {
 export default function QrScannerModal({
   amount,
   isOpen,
+  isSaving = false,
   onClose,
   onScanSuccess,
 }: QrScannerModalProps) {
   const scannerRef = useRef<Html5QrcodeScanner | null>(null);
 
   useEffect(() => {
-    // Don't mount the scanner if modal is closed
     if (!isOpen) return;
 
-    // Small delay so the DOM element is guaranteed to be in the tree
+    // Small delay so the DOM anchor is guaranteed to be in the tree
     const initTimer = setTimeout(() => {
       const scanner = new Html5QrcodeScanner(
         "qr-reader",
         {
           fps: 10,
-          qrbox: { width: 250, height: 250 },
+          qrbox: { width: 260, height: 260 },
           aspectRatio: 1.0,
           showTorchButtonIfSupported: true,
           videoConstraints: { facingMode: "environment" },
@@ -49,54 +54,44 @@ export default function QrScannerModal({
       scanner.render(
         // ── Success callback ──────────────────────────────────────────────
         (decodedText) => {
-          // Stop immediately so the camera doesn't keep running
+          // Stop the camera immediately
           scanner
             .clear()
             .catch((err) => console.error("[QrScanner] clear error:", err));
 
           if (onScanSuccess) {
-            // New behavior: delegate to parent for UPI parsing & validation
+            // Delegate to parent — parent shows isSaving overlay
             onScanSuccess(decodedText);
           } else {
-            // Legacy fallback: direct UPI redirect (kept for backwards compatibility)
+            // Legacy fallback: direct UPI redirect
             if (!decodedText.toLowerCase().startsWith("upi://pay")) {
-              alert(
-                "The scanned QR code is not a valid UPI payment code. Please try again."
-              );
+              alert("The scanned QR code is not a valid UPI payment code.");
               onClose();
               return;
             }
-
             try {
               const upiUrl = new URL(decodedText);
               const pa = upiUrl.searchParams.get("pa");
               const pn = upiUrl.searchParams.get("pn") || "Merchant";
-
               if (!pa) {
-                alert(
-                  "Invalid UPI QR Code: Missing Payee Address (pa). Please try a different QR code."
-                );
+                alert("Invalid UPI QR Code: Missing Payee Address (pa).");
                 onClose();
                 return;
               }
-
-              const finalLink = `upi://pay?pa=${encodeURIComponent(pa)}&pn=${encodeURIComponent(pn)}&am=${amount.toFixed(2)}&cu=INR`;
-              window.location.href = finalLink;
+              window.location.href = `upi://pay?pa=${encodeURIComponent(pa)}&pn=${encodeURIComponent(pn)}&am=${amount.toFixed(2)}&cu=INR`;
             } catch {
               alert("Failed to parse the UPI QR Code. Please try again.");
             }
-
             onClose();
           }
         },
 
-        // ── Error callback (per-frame) ─────────────────────────────────────
-        // These fire constantly when no QR is in frame — intentionally silent.
+        // ── Per-frame error (no QR in frame) — silently ignored ─────────
         (_errorMessage) => { /* noop */ }
       );
     }, 50);
 
-    // ── Cleanup: called when isOpen → false or component unmounts ─────────
+    // ── Cleanup: stop camera when modal closes or component unmounts ────
     return () => {
       clearTimeout(initTimer);
       if (scannerRef.current) {
@@ -114,7 +109,6 @@ export default function QrScannerModal({
     };
   }, [isOpen, amount, onClose, onScanSuccess]);
 
-  // Render nothing when closed — avoids mounting the DOM anchor
   if (!isOpen) return null;
 
   return (
@@ -124,17 +118,18 @@ export default function QrScannerModal({
       aria-label="Scan UPI QR Code"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
       onClick={(e) => {
-        // Click outside the card → close
-        if (e.target === e.currentTarget) onClose();
+        // Clicking outside dismisses — unless save is in progress
+        if (!isSaving && e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl dark:bg-zinc-900">
-        {/* Header */}
+      <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl relative overflow-hidden">
+
+        {/* ── Header ── */}
         <div className="mb-4 text-center">
-          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-indigo-50 dark:bg-indigo-900/40">
+          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-indigo-50">
             <svg
               xmlns="http://www.w3.org/2000/svg"
-              className="h-6 w-6 text-indigo-600 dark:text-indigo-400"
+              className="h-6 w-6 text-indigo-600"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -147,32 +142,64 @@ export default function QrScannerModal({
               />
             </svg>
           </div>
-          <h3 className="text-xl font-bold text-zinc-900 dark:text-white">
-            Scan &amp; Pay
-          </h3>
-          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-            Point at any merchant&apos;s UPI QR code to pay exactly{" "}
-            <strong className="font-semibold text-indigo-600 dark:text-indigo-400">
-              ₹{amount.toFixed(2)}
-            </strong>
+          <h3 className="text-xl font-bold text-zinc-900">Scan &amp; Pay</h3>
+          <p className="mt-1 text-sm text-zinc-500">
+            {amount > 0 ? (
+              <>
+                Point at a merchant&apos;s UPI QR code to instantly pay{" "}
+                <strong className="font-semibold text-indigo-600">
+                  ₹{amount.toFixed(2)}
+                </strong>
+              </>
+            ) : (
+              <span className="text-amber-600 font-medium">
+                ⚠ Enter an amount first, then scan
+              </span>
+            )}
           </p>
         </div>
 
-        {/* Camera / Scanner mount point — html5-qrcode injects video here */}
+        {/* ── Camera / Scanner mount point ── */}
         <div
           id="qr-reader"
-          className="overflow-hidden rounded-xl border-2 border-dashed border-zinc-300 dark:border-zinc-700 [&_video]:w-full [&_video]:rounded-lg [&_select]:text-sm [&_select]:rounded [&_img]:hidden"
+          className="overflow-hidden rounded-xl border-2 border-dashed border-zinc-300 [&_video]:w-full [&_video]:rounded-lg [&_select]:text-sm [&_select]:rounded [&_img]:hidden"
         />
 
-        {/* Cancel button */}
+        {/* ── Cancel button ── */}
         <button
           type="button"
           id="qr-scanner-cancel-btn"
           onClick={onClose}
-          className="mt-5 w-full rounded-xl bg-zinc-100 py-3 text-sm font-semibold text-zinc-900 transition-colors hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-100 dark:hover:bg-zinc-700"
+          disabled={isSaving}
+          className="mt-5 w-full rounded-xl bg-zinc-100 py-3 text-sm font-semibold text-zinc-900 transition-colors hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Cancel Scanning
         </button>
+
+        {/* ── Saving overlay (shown while parent is writing to DB + firing deep-link) ── */}
+        {isSaving && (
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 rounded-2xl bg-white/95 backdrop-blur-sm">
+            {/* Animated ring */}
+            <div className="relative flex items-center justify-center">
+              <div className="h-20 w-20 rounded-full border-4 border-indigo-100" />
+              <div className="absolute h-20 w-20 animate-spin rounded-full border-4 border-transparent border-t-indigo-600" />
+              <CheckCircle2 className="absolute h-8 w-8 text-indigo-600" />
+            </div>
+
+            <div className="text-center">
+              <p className="text-base font-bold text-zinc-900">QR Scanned!</p>
+              <p className="mt-1 text-sm text-zinc-500 flex items-center justify-center gap-1.5">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Saving &amp; opening UPI payment…
+              </p>
+            </div>
+
+            {/* Amount badge */}
+            <div className="rounded-full bg-indigo-600 px-5 py-1.5 text-sm font-semibold text-white shadow-lg shadow-indigo-200">
+              ₹{amount.toFixed(2)}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
