@@ -12,12 +12,19 @@ if (!supabaseUrl || !supabaseAnonKey) {
 // Singleton browser client – safe to import in Client Components
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-// Type definitions that mirror the DB schema
+// ── Status enum ──────────────────────────────────────────────────────────────
+export type TransactionStatus = "PENDING" | "COMPLETED" | "CANCELLED";
+
+// Type definitions that mirror the DB schema (v2 — with UPI tracking)
 export type Transaction = {
   id: string;
   user_id: string;
   amount: number;
-  user_note: string | null;
   category: string;
+  user_note: string | null;
   created_at: string;
+  payee_upi_id: string | null;
+  status: TransactionStatus;
+  upi_ref: string | null;
 };
+

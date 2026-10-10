@@ -31,6 +31,16 @@ export async function middleware(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
+  // ── Protected routes guard ─────────────────────────────────────────────────
+  // Unauthenticated users trying to access /intent or /dashboard are bounced
+  // back to the login page.
+  const protectedPaths = ["/intent", "/dashboard"];
+  if (!user && protectedPaths.some((p) => request.nextUrl.pathname.startsWith(p))) {
+    const loginUrl = request.nextUrl.clone();
+    loginUrl.pathname = "/";
+    return NextResponse.redirect(loginUrl);
+  }
+
   // ── Teleporter rule ────────────────────────────────────────────────────────
   // Authenticated users who land on "/" (the login page) are bounced straight
   // to /intent so they never have to log in again after their first session.

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
+import { isValidUpiId, buildUpiDeepLink, parseUpiQrCode, isValidUtr } from "@/utils/upi";
 import QrScannerModal from "@/components/QrScannerModal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,6 +27,8 @@ import {
   LogOut,
   CheckCircle2,
   AlertCircle,
+  ScanLine,
+  Keyboard,
 } from "lucide-react";
 
 // ─────────────────────────────────────────────────────────────
@@ -42,6 +45,7 @@ const CATEGORIES = [
 ] as const;
 
 type Category = (typeof CATEGORIES)[number];
+type UpiInputMode = "manual" | "scan";
 
 // ─────────────────────────────────────────────────────────────
 // Component
@@ -81,6 +85,12 @@ export default function IntentPage() {
   const [category, setCategory] = useState<Category | null>(null);
   const [manualCategory, setManualCategory] = useState<Category>(CATEGORIES[0]);
 
+  // ── UPI input state ──
+  const [upiMode, setUpiMode] = useState<UpiInputMode>("manual");
+  const [upiId, setUpiId] = useState("");
+  const [payeeName, setPayeeName] = useState("");
+  const upiValid = upiId.trim().length > 0 && isValidUpiId(upiId);
+
   // ── Scanner state ──
   const [showScanner, setShowScanner] = useState(false);
   const [savedAmount, setSavedAmount] = useState(0);
@@ -89,6 +99,40 @@ export default function IntentPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
+
+  // ── Post-payment confirmation state ──
+  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [pendingTxnId, setPendingTxnId] = useState<string | null>(null);
+  const [pendingPayeeUpi, setPendingPayeeUpi] = useState<string>("");
+  const [pendingAmount, setPendingAmount] = useState<number>(0);
+  const [utrInput, setUtrInput] = useState("");
+  const [confirmSaving, setConfirmSaving] = useState(false);
+  const paymentInitiatedRef = useRef(false);
+  const hiddenAtRef = useRef<number>(0);
+
+  // ─────────────────────────────────────────────────────────────
+  // Post-payment return detection (Step 4 — SOP-TRACK)
+  // ─────────────────────────────────────────────────────────────
+  const handleVisibilityChange = useCallback(() => {
+    if (document.visibilityState === "hidden") {
+      hiddenAtRef.current = Date.now();
+    }
+
+    if (document.visibilityState === "visible" && paymentInitiatedRef.current) {
+      const hiddenDuration = Date.now() - hiddenAtRef.current;
+      // Only show dialog if user was away for at least 3 seconds
+      // (filters out accidental tab switches)
+      if (hiddenDuration > 3000) {
+        paymentInitiatedRef.current = false;
+        setShowConfirmDialog(true);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [handleVisibilityChange]);
 
   // ─────────────────────────────────────────────────────────────
   // Handlers
@@ -134,8 +178,23 @@ export default function IntentPage() {
     }
   }
 
-  // Save to DB then open the QR scanner so the UPI redirect only fires
-  // after the user scans a real merchant code — not blindly on button click.
+  /** Called when the QR scanner successfully reads a UPI code */
+  function handleQrScanSuccess(scannedUrl: string) {
+    const parsed = parseUpiQrCode(scannedUrl);
+    if (!parsed) {
+      setSaveError("The scanned QR code is not a valid UPI payment code.");
+      setShowScanner(false);
+      return;
+    }
+
+    // Auto-fill the UPI fields from the QR code
+    setUpiId(parsed.pa);
+    setPayeeName(parsed.pn);
+    setUpiMode("manual"); // Switch to manual view so user sees the filled fields
+    setShowScanner(false);
+  }
+
+  // Save to DB with status PENDING, then fire UPI deep-link
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setSaveError(null);
@@ -144,6 +203,23 @@ export default function IntentPage() {
     const parsedAmount = parseFloat(amount);
     if (!parsedAmount || parsedAmount <= 0) {
       setSaveError("Please enter a valid amount greater than 0.");
+      return;
+    }
+
+    // Validate UPI ID
+    const trimmedUpi = upiId.trim();
+    if (!trimmedUpi) {
+      setSaveError("Please enter a UPI ID or scan a QR code.");
+      return;
+    }
+    if (!isValidUpiId(trimmedUpi)) {
+      setSaveError("Invalid UPI ID format. Example: shop@oksbi");
+      return;
+    }
+
+    // Validate note length (SOP-SEC Rule 2)
+    if (note.trim().length > 200) {
+      setSaveError("Note must be 200 characters or less.");
       return;
     }
 
@@ -158,26 +234,98 @@ export default function IntentPage() {
     setSaving(true);
 
     try {
-      const { error: dbError } = await supabase.from("user_transactions").insert({
-        user_id: userId,
-        amount: parsedAmount,
-        user_note: note.trim() || null,
-        category: finalCategory,
-      });
+      const { data: insertedRows, error: dbError } = await supabase
+        .from("user_transactions")
+        .insert({
+          user_id: userId,
+          amount: parsedAmount,
+          user_note: note.trim() || null,
+          category: finalCategory,
+          payee_upi_id: trimmedUpi,
+          status: "PENDING",
+        })
+        .select("id")
+        .single();
 
       if (dbError) throw dbError;
+
+      // Store the pending transaction info for the confirmation dialog
+      setPendingTxnId(insertedRows.id);
+      setPendingPayeeUpi(trimmedUpi);
+      setPendingAmount(parsedAmount);
 
       setSavedOk(true);
       setSavedAmount(parsedAmount);
 
-      // Open the QR scanner — UPI deep-link fires only after a successful scan
-      setTimeout(() => setShowScanner(true), 600);
+      // Construct and fire the UPI deep-link
+      const deepLink = buildUpiDeepLink(trimmedUpi, parsedAmount, payeeName.trim() || undefined);
+
+      if (deepLink) {
+        // Mark that a payment was initiated — used by visibilitychange listener
+        paymentInitiatedRef.current = true;
+        // Small delay so user sees the "Saved!" feedback
+        setTimeout(() => {
+          window.location.href = deepLink;
+        }, 600);
+      } else {
+        setSaveError("Failed to construct UPI link. Please check the UPI ID.");
+        paymentInitiatedRef.current = false;
+      }
     } catch (err: unknown) {
       console.error("[IntentPage] Save failed:", err);
       setSaveError(err instanceof Error ? err.message : "Failed to save. Please try again.");
     } finally {
       setSaving(false);
     }
+  }
+
+  /** Confirm payment status after returning from GPay */
+  async function handleConfirmPayment(status: "COMPLETED" | "CANCELLED") {
+    if (!pendingTxnId) return;
+    setConfirmSaving(true);
+
+    try {
+      const updatePayload: Record<string, string> = { status };
+      const trimmedUtr = utrInput.trim();
+      if (status === "COMPLETED" && trimmedUtr && isValidUtr(trimmedUtr)) {
+        updatePayload.upi_ref = trimmedUtr;
+      }
+
+      const { error: updateError } = await supabase
+        .from("user_transactions")
+        .update(updatePayload)
+        .eq("id", pendingTxnId);
+
+      if (updateError) throw updateError;
+    } catch (err) {
+      console.error("[IntentPage] Status update failed:", err);
+    } finally {
+      setConfirmSaving(false);
+      setShowConfirmDialog(false);
+      resetForm();
+    }
+  }
+
+  function dismissConfirmDialog() {
+    // "I'll confirm later" — leave as PENDING
+    setShowConfirmDialog(false);
+    resetForm();
+  }
+
+  function resetForm() {
+    setAmount("");
+    setNote("");
+    setCategory(null);
+    setPreviewUrl(null);
+    setVisionFailed(false);
+    setSavedOk(false);
+    setSavedAmount(0);
+    setUpiId("");
+    setPayeeName("");
+    setUtrInput("");
+    setPendingTxnId(null);
+    setPendingPayeeUpi("");
+    setPendingAmount(0);
   }
 
   async function handleSignOut() {
@@ -189,7 +337,7 @@ export default function IntentPage() {
   // Derived helpers
   // ─────────────────────────────────────────────────────────────
   const activeCategory: Category | null = visionFailed ? manualCategory : category;
-  const canSubmit = !!amount && parseFloat(amount) > 0 && (!!activeCategory || visionFailed);
+  const canSubmit = !!amount && parseFloat(amount) > 0 && (!!activeCategory || visionFailed) && upiValid;
 
   // ─────────────────────────────────────────────────────────────
   // Loading skeleton while auth is being checked
@@ -289,17 +437,100 @@ export default function IntentPage() {
                   <Label htmlFor="note-input" className="flex items-center gap-1.5 text-xs font-semibold text-zinc-700 uppercase tracking-wide">
                     <FileText className="h-3.5 w-3.5 text-indigo-500" />
                     Quick Note
-                    <span className="ml-1 font-normal normal-case text-zinc-400">(optional)</span>
+                    <span className="ml-1 font-normal normal-case text-zinc-400">(optional, max 200 chars)</span>
                   </Label>
                   <Input
                     id="note-input"
                     type="text"
                     placeholder="e.g. Lunch at Sharma Dhaba"
+                    maxLength={200}
                     value={note}
                     onChange={(e) => setNote(e.target.value)}
                     className="h-10"
                     disabled={saving}
                   />
+                </div>
+
+                {/* ── UPI Payee (DUAL INPUT — Manual or QR) ── */}
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-1.5 text-xs font-semibold text-zinc-700 uppercase tracking-wide">
+                    <IndianRupee className="h-3.5 w-3.5 text-indigo-500" />
+                    Pay To (UPI ID)
+                  </Label>
+
+                  {/* Mode switcher */}
+                  <div className="flex gap-1 rounded-lg bg-zinc-100 p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setUpiMode("manual")}
+                      className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                        upiMode === "manual"
+                          ? "bg-white text-zinc-900 shadow-sm"
+                          : "text-zinc-500 hover:text-zinc-700"
+                      }`}
+                    >
+                      <Keyboard className="h-3.5 w-3.5" />
+                      Type UPI ID
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUpiMode("scan");
+                        setShowScanner(true);
+                      }}
+                      className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                        upiMode === "scan"
+                          ? "bg-white text-zinc-900 shadow-sm"
+                          : "text-zinc-500 hover:text-zinc-700"
+                      }`}
+                    >
+                      <ScanLine className="h-3.5 w-3.5" />
+                      Scan QR Code
+                    </button>
+                  </div>
+
+                  {/* Manual UPI input */}
+                  <div className="space-y-1.5">
+                    <Input
+                      id="upi-id-input"
+                      type="text"
+                      placeholder="e.g. shop@oksbi"
+                      value={upiId}
+                      onChange={(e) => setUpiId(e.target.value)}
+                      className={`h-10 ${
+                        upiId.trim().length > 0
+                          ? upiValid
+                            ? "border-emerald-400 focus-visible:ring-emerald-200"
+                            : "border-red-400 focus-visible:ring-red-200"
+                          : ""
+                      }`}
+                      disabled={saving}
+                    />
+                    {upiId.trim().length > 0 && !upiValid && (
+                      <p className="text-xs text-red-500">
+                        Invalid format. Example: shop@oksbi, 9876543210@ybl
+                      </p>
+                    )}
+                    {upiValid && (
+                      <div className="flex items-center gap-1.5">
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                        <p className="text-xs text-emerald-600">Valid UPI ID</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Optional payee name */}
+                  {upiValid && (
+                    <Input
+                      id="payee-name-input"
+                      type="text"
+                      placeholder="Payee name (optional)"
+                      value={payeeName}
+                      onChange={(e) => setPayeeName(e.target.value)}
+                      className="h-9 text-sm"
+                      disabled={saving}
+                    />
+                  )}
                 </div>
 
                 {/* ── Camera Capture ── */}
@@ -438,7 +669,7 @@ export default function IntentPage() {
                   >
                     <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
                     <p className="text-xs text-emerald-700">
-                      Intent saved! Redirecting to Google Pay…
+                      Intent saved! Opening UPI payment…
                     </p>
                   </div>
                 )}
@@ -462,12 +693,12 @@ export default function IntentPage() {
                 ) : savedOk ? (
                   <>
                     <CheckCircle2 className="mr-2 h-4 w-4" />
-                    Saved! Opening Scanner…
+                    Saved! Opening UPI…
                   </>
                 ) : (
                   <>
                     <IndianRupee className="mr-1 h-4 w-4" />
-                    Save &amp; Scan QR to Pay
+                    Save &amp; Pay via UPI
                   </>
                 )}
               </Button>
@@ -492,22 +723,91 @@ export default function IntentPage() {
         </div>
       </main>
 
-      {/* ── QR Scanner Modal — opens after save, UPI fires only on scan ── */}
-      <QrScannerModal
-        amount={savedAmount}
-        isOpen={showScanner}
-        onClose={() => {
-          setShowScanner(false);
-          // Reset form after scanner is dismissed so user can log another intent
-          setAmount("");
-          setNote("");
-          setCategory(null);
-          setPreviewUrl(null);
-          setVisionFailed(false);
-          setSavedOk(false);
-          setSavedAmount(0);
-        }}
-      />
+      {/* ── QR Scanner Modal ── */}
+      {showScanner && (
+        <QrScannerModal
+          amount={parseFloat(amount) || 0}
+          isOpen={showScanner}
+          onClose={() => setShowScanner(false)}
+          onScanSuccess={handleQrScanSuccess}
+        />
+      )}
+
+      {/* ── Post-Payment Confirmation Dialog ── */}
+      {showConfirmDialog && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm Payment Status"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+        >
+          <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl space-y-4">
+            <div className="text-center">
+              <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-indigo-50">
+                <IndianRupee className="h-6 w-6 text-indigo-600" />
+              </div>
+              <h3 className="text-lg font-bold text-zinc-900">
+                Payment Confirmation
+              </h3>
+              <p className="mt-1 text-sm text-zinc-500">
+                Did your{" "}
+                <strong className="text-indigo-600">₹{pendingAmount.toFixed(2)}</strong>{" "}
+                payment to{" "}
+                <strong className="text-zinc-800">{pendingPayeeUpi}</strong>{" "}
+                succeed?
+              </p>
+            </div>
+
+            {/* Optional UTR input */}
+            <div className="space-y-1.5">
+              <Label htmlFor="utr-input" className="text-xs text-zinc-500">
+                UPI Reference / UTR (12 digits, optional)
+              </Label>
+              <Input
+                id="utr-input"
+                type="text"
+                inputMode="numeric"
+                maxLength={12}
+                placeholder="e.g. 412345678901"
+                value={utrInput}
+                onChange={(e) => setUtrInput(e.target.value.replace(/\D/g, ""))}
+              />
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <Button
+                id="confirm-payment-success-btn"
+                onClick={() => handleConfirmPayment("COMPLETED")}
+                disabled={confirmSaving}
+                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white"
+              >
+                {confirmSaving ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="mr-2 h-4 w-4" />
+                )}
+                Payment Successful
+              </Button>
+              <Button
+                id="confirm-payment-failed-btn"
+                variant="outline"
+                onClick={() => handleConfirmPayment("CANCELLED")}
+                disabled={confirmSaving}
+                className="w-full border-red-200 text-red-600 hover:bg-red-50"
+              >
+                Payment Failed / Cancelled
+              </Button>
+              <button
+                type="button"
+                onClick={dismissConfirmDialog}
+                className="text-xs text-zinc-400 hover:text-zinc-600 transition"
+              >
+                I&apos;ll confirm later
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

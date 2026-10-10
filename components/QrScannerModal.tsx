@@ -4,18 +4,25 @@ import { useEffect, useRef } from "react";
 import { Html5QrcodeScanner, Html5QrcodeScannerState } from "html5-qrcode";
 
 interface QrScannerModalProps {
-  /** The transaction amount to embed in the UPI deep link */
+  /** The transaction amount to display in the UI */
   amount: number;
   /** Controls visibility — parent must manage this */
   isOpen: boolean;
-  /** Called when the user dismisses the modal or after a successful scan */
+  /** Called when the user dismisses the modal */
   onClose: () => void;
+  /**
+   * Called when a valid QR code is scanned.
+   * The parent handles UPI parsing and deep-link construction.
+   * If not provided, falls back to legacy behavior (direct redirect).
+   */
+  onScanSuccess?: (decodedText: string) => void;
 }
 
 export default function QrScannerModal({
   amount,
   isOpen,
   onClose,
+  onScanSuccess,
 }: QrScannerModalProps) {
   const scannerRef = useRef<Html5QrcodeScanner | null>(null);
 
@@ -47,38 +54,40 @@ export default function QrScannerModal({
             .clear()
             .catch((err) => console.error("[QrScanner] clear error:", err));
 
-          if (!decodedText.toLowerCase().startsWith("upi://pay")) {
-            alert(
-              "The scanned QR code is not a valid UPI payment code. Please try again."
-            );
-            onClose();
-            return;
-          }
-
-          try {
-            const upiUrl = new URL(decodedText);
-            const pa = upiUrl.searchParams.get("pa"); // Payee VPA (merchant ID)
-            const pn =
-              upiUrl.searchParams.get("pn") || "Merchant"; // Payee name
-
-            if (!pa) {
+          if (onScanSuccess) {
+            // New behavior: delegate to parent for UPI parsing & validation
+            onScanSuccess(decodedText);
+          } else {
+            // Legacy fallback: direct UPI redirect (kept for backwards compatibility)
+            if (!decodedText.toLowerCase().startsWith("upi://pay")) {
               alert(
-                "Invalid UPI QR Code: Missing Payee Address (pa). Please try a different QR code."
+                "The scanned QR code is not a valid UPI payment code. Please try again."
               );
               onClose();
               return;
             }
 
-            // Construct the final deep link with the dynamic amount
-            const finalLink = `upi://pay?pa=${encodeURIComponent(pa)}&pn=${encodeURIComponent(pn)}&am=${amount.toFixed(2)}&cu=INR`;
-            window.location.href = finalLink;
-          } catch {
-            alert(
-              "Failed to parse the UPI QR Code. Please try again."
-            );
-          }
+            try {
+              const upiUrl = new URL(decodedText);
+              const pa = upiUrl.searchParams.get("pa");
+              const pn = upiUrl.searchParams.get("pn") || "Merchant";
 
-          onClose();
+              if (!pa) {
+                alert(
+                  "Invalid UPI QR Code: Missing Payee Address (pa). Please try a different QR code."
+                );
+                onClose();
+                return;
+              }
+
+              const finalLink = `upi://pay?pa=${encodeURIComponent(pa)}&pn=${encodeURIComponent(pn)}&am=${amount.toFixed(2)}&cu=INR`;
+              window.location.href = finalLink;
+            } catch {
+              alert("Failed to parse the UPI QR Code. Please try again.");
+            }
+
+            onClose();
+          }
         },
 
         // ── Error callback (per-frame) ─────────────────────────────────────
@@ -103,7 +112,7 @@ export default function QrScannerModal({
         scannerRef.current = null;
       }
     };
-  }, [isOpen, amount, onClose]);
+  }, [isOpen, amount, onClose, onScanSuccess]);
 
   // Render nothing when closed — avoids mounting the DOM anchor
   if (!isOpen) return null;

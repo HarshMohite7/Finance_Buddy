@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -28,6 +28,20 @@ type AuthMode = "login" | "signup";
 export default function LandingPage() {
   const supabase = createClient();
   const router = useRouter();
+
+  // --- Session check (client-side backup for middleware teleporter) ---
+  // If the user already has a valid cookie, skip the login form entirely.
+  const [checkingSession, setCheckingSession] = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (user) {
+        router.replace("/intent");
+      } else {
+        setCheckingSession(false);
+      }
+    });
+  }, [router, supabase.auth]);
 
   // --- Auth State ---
   const [mode, setMode] = useState<AuthMode>("login");
@@ -98,6 +112,15 @@ export default function LandingPage() {
       desc: "Get a personalised, slightly snarky Groq AI tip emailed to you every day.",
     },
   ];
+
+  // --- Session check in progress: show loader, not the login form ---
+  if (checkingSession) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-zinc-50">
+        <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col min-h-full bg-zinc-50">
