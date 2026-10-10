@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { Html5QrcodeScanner, Html5QrcodeScannerState } from "html5-qrcode";
-import { Loader2, CheckCircle2 } from "lucide-react";
+import { useRef, useState } from "react";
+import { Html5Qrcode } from "html5-qrcode";
+import { Loader2, CheckCircle2, Camera, ScanLine, AlertCircle } from "lucide-react";
 
 interface QrScannerModalProps {
   /** The transaction amount to display in the UI */
@@ -10,19 +10,28 @@ interface QrScannerModalProps {
   /** Controls visibility — parent must manage this */
   isOpen: boolean;
   /**
-   * True while the parent is saving to DB + firing UPI deep-link.
-   * When true the scanner is replaced with a loading overlay.
+   * True while the parent is saving to DB + firing the UPI deep-link.
+   * Replaces the UI with a "Saving…" overlay.
    */
   isSaving?: boolean;
   /** Called when the user dismisses the modal (blocked while isSaving) */
   onClose: () => void;
   /**
-   * Called with the raw decoded QR string when a valid code is scanned.
-   * Parent handles UPI parsing, DB save, and UPI deep-link.
+   * Called with the raw decoded QR string.
+   * Parent is responsible for UPI parsing, DB save, and deep-link.
    */
   onScanSuccess?: (decodedText: string) => void;
 }
 
+/**
+ * QrScannerModal — Camera-capture QR decoder
+ *
+ * Strategy: instead of streaming video (which requires getUserMedia +
+ * HTTPS + browser permission grants and is unreliable on iOS Safari),
+ * we use the native file input with capture="environment" to let the
+ * user take a photo of the QR code, then decode it from the image with
+ * Html5Qrcode.scanFile(). This works on every mobile browser.
+ */
 export default function QrScannerModal({
   amount,
   isOpen,
@@ -30,123 +39,124 @@ export default function QrScannerModal({
   onClose,
   onScanSuccess,
 }: QrScannerModalProps) {
-  const scannerRef = useRef<Html5QrcodeScanner | null>(null);
-
-  useEffect(() => {
-    if (!isOpen) return;
-
-    // Small delay so the DOM anchor is guaranteed to be in the tree
-    const initTimer = setTimeout(() => {
-      const scanner = new Html5QrcodeScanner(
-        "qr-reader",
-        {
-          fps: 10,
-          qrbox: { width: 260, height: 260 },
-          aspectRatio: 1.0,
-          showTorchButtonIfSupported: true,
-          videoConstraints: { facingMode: "environment" },
-        },
-        /* verbose= */ false
-      );
-
-      scannerRef.current = scanner;
-
-      scanner.render(
-        // ── Success callback ──────────────────────────────────────────────
-        (decodedText) => {
-          // Stop the camera immediately
-          scanner
-            .clear()
-            .catch((err) => console.error("[QrScanner] clear error:", err));
-
-          if (onScanSuccess) {
-            // Delegate to parent — parent shows isSaving overlay
-            onScanSuccess(decodedText);
-          } else {
-            // Legacy fallback: direct UPI redirect
-            if (!decodedText.toLowerCase().startsWith("upi://pay")) {
-              alert("The scanned QR code is not a valid UPI payment code.");
-              onClose();
-              return;
-            }
-            try {
-              const upiUrl = new URL(decodedText);
-              const pa = upiUrl.searchParams.get("pa");
-              const pn = upiUrl.searchParams.get("pn") || "Merchant";
-              if (!pa) {
-                alert("Invalid UPI QR Code: Missing Payee Address (pa).");
-                onClose();
-                return;
-              }
-              window.location.href = `upi://pay?pa=${encodeURIComponent(pa)}&pn=${encodeURIComponent(pn)}&am=${amount.toFixed(2)}&cu=INR`;
-            } catch {
-              alert("Failed to parse the UPI QR Code. Please try again.");
-            }
-            onClose();
-          }
-        },
-
-        // ── Per-frame error (no QR in frame) — silently ignored ─────────
-        (_errorMessage) => { /* noop */ }
-      );
-    }, 50);
-
-    // ── Cleanup: stop camera when modal closes or component unmounts ────
-    return () => {
-      clearTimeout(initTimer);
-      if (scannerRef.current) {
-        const state = scannerRef.current.getState();
-        if (
-          state === Html5QrcodeScannerState.SCANNING ||
-          state === Html5QrcodeScannerState.PAUSED
-        ) {
-          scannerRef.current
-            .clear()
-            .catch((err) => console.error("[QrScanner] cleanup error:", err));
-        }
-        scannerRef.current = null;
-      }
-    };
-  }, [isOpen, amount, onClose, onScanSuccess]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [decoding, setDecoding] = useState(false);
+  const [decodeError, setDecodeError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
+  // ── Handle photo taken by the user ──────────────────────────────────────
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Reset state
+    setDecodeError(null);
+    setDecoding(true);
+
+    // Show image preview immediately
+    const objectUrl = URL.createObjectURL(file);
+    setPreview(objectUrl);
+
+    try {
+      // Use a temporary invisible div as the decoder anchor
+      const tempId = "qr-decode-anchor";
+      let anchor = document.getElementById(tempId);
+      if (!anchor) {
+        anchor = document.createElement("div");
+        anchor.id = tempId;
+        anchor.style.display = "none";
+        document.body.appendChild(anchor);
+      }
+
+      const decoder = new Html5Qrcode(tempId);
+
+      const decodedText = await decoder
+        .scanFile(file, /* showImage= */ false)
+        .finally(() => {
+          try { decoder.clear(); } catch { /* ignore */ }
+        });
+
+
+      // Successfully decoded — hand off to parent
+      if (onScanSuccess) {
+        onScanSuccess(decodedText);
+      } else {
+        // Legacy fallback: direct UPI redirect
+        if (!decodedText.toLowerCase().startsWith("upi://pay")) {
+          setDecodeError("Not a UPI QR code. Please try again.");
+          setDecoding(false);
+          return;
+        }
+        try {
+          const upiUrl = new URL(decodedText);
+          const pa = upiUrl.searchParams.get("pa");
+          const pn = upiUrl.searchParams.get("pn") || "Merchant";
+          if (!pa) {
+            setDecodeError("QR code missing Payee Address. Try again.");
+            setDecoding(false);
+            return;
+          }
+          window.location.href = `upi://pay?pa=${encodeURIComponent(pa)}&pn=${encodeURIComponent(pn)}&am=${amount.toFixed(2)}&cu=INR`;
+        } catch {
+          setDecodeError("Failed to parse UPI QR code. Try again.");
+        }
+        setDecoding(false);
+        onClose();
+      }
+    } catch {
+      // Html5Qrcode throws when it can't find a QR code in the image
+      setDecodeError(
+        "No QR code found in the photo. Make sure the QR code fills the frame clearly and try again."
+      );
+      setDecoding(false);
+    } finally {
+      // Reset file input so the same file can be re-selected
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  function retryCapture() {
+    setDecodeError(null);
+    setPreview(null);
+    fileInputRef.current?.click();
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-label="Scan UPI QR Code"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm"
       onClick={(e) => {
-        // Clicking outside dismisses — unless save is in progress
-        if (!isSaving && e.target === e.currentTarget) onClose();
+        if (!isSaving && !decoding && e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl relative overflow-hidden">
+      {/* Hidden file input — capture="environment" opens the rear camera natively */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={handleFileChange}
+      />
+
+      <div className="w-full max-w-sm rounded-2xl bg-white shadow-2xl relative overflow-hidden">
 
         {/* ── Header ── */}
-        <div className="mb-4 text-center">
+        <div className="px-6 pt-6 pb-4 text-center border-b border-zinc-100">
           <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-indigo-50">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="h-6 w-6 text-indigo-600"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"
-              />
-            </svg>
+            <ScanLine className="h-6 w-6 text-indigo-600" />
           </div>
-          <h3 className="text-xl font-bold text-zinc-900">Scan &amp; Pay</h3>
+          <h3 className="text-lg font-bold text-zinc-900">Scan QR &amp; Pay</h3>
           <p className="mt-1 text-sm text-zinc-500">
             {amount > 0 ? (
               <>
-                Point at a merchant&apos;s UPI QR code to instantly pay{" "}
+                Snap a photo of the merchant&apos;s UPI QR code
+                {" "}to pay{" "}
                 <strong className="font-semibold text-indigo-600">
                   ₹{amount.toFixed(2)}
                 </strong>
@@ -159,43 +169,114 @@ export default function QrScannerModal({
           </p>
         </div>
 
-        {/* ── Camera / Scanner mount point ── */}
-        <div
-          id="qr-reader"
-          className="overflow-hidden rounded-xl border-2 border-dashed border-zinc-300 [&_video]:w-full [&_video]:rounded-lg [&_select]:text-sm [&_select]:rounded [&_img]:hidden"
-        />
+        {/* ── Body ── */}
+        <div className="px-6 py-5 space-y-4">
 
-        {/* ── Cancel button ── */}
-        <button
-          type="button"
-          id="qr-scanner-cancel-btn"
-          onClick={onClose}
-          disabled={isSaving}
-          className="mt-5 w-full rounded-xl bg-zinc-100 py-3 text-sm font-semibold text-zinc-900 transition-colors hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          Cancel Scanning
-        </button>
+          {/* Preview of captured image */}
+          {preview && (
+            <div className="relative overflow-hidden rounded-xl border border-zinc-200 bg-zinc-50">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={preview}
+                alt="QR code capture"
+                className="w-full max-h-52 object-contain"
+              />
+              {decoding && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/50 backdrop-blur-sm">
+                  <Loader2 className="h-8 w-8 animate-spin text-white" />
+                  <p className="text-xs font-medium text-white">Reading QR code…</p>
+                </div>
+              )}
+            </div>
+          )}
 
-        {/* ── Saving overlay (shown while parent is writing to DB + firing deep-link) ── */}
+          {/* Error state */}
+          {decodeError && (
+            <div className="flex items-start gap-2.5 rounded-xl bg-red-50 px-4 py-3 ring-1 ring-red-200">
+              <AlertCircle className="h-4 w-4 text-red-500 shrink-0 mt-0.5" />
+              <p className="text-xs text-red-700 leading-relaxed">{decodeError}</p>
+            </div>
+          )}
+
+          {/* Instructions (shown before first capture) */}
+          {!preview && !decodeError && (
+            <div className="rounded-xl bg-indigo-50 px-4 py-4 space-y-2.5">
+              {[
+                "Tap the button below to open your camera",
+                "Point it squarely at the merchant's UPI QR code",
+                "Take the photo — the QR is decoded automatically",
+                "Google Pay opens instantly with the amount pre-filled",
+              ].map((step, i) => (
+                <div key={i} className="flex items-center gap-3">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-[10px] font-bold text-white">
+                    {i + 1}
+                  </span>
+                  <p className="text-xs text-indigo-800">{step}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Primary action button */}
+          {!decoding && (
+            <button
+              type="button"
+              id="qr-open-camera-btn"
+              disabled={isSaving}
+              onClick={() => {
+                setDecodeError(null);
+                setPreview(null);
+                fileInputRef.current?.click();
+              }}
+              className="w-full flex items-center justify-center gap-2.5 rounded-xl bg-indigo-600 py-3.5 text-sm font-semibold text-white shadow-md shadow-indigo-200 transition hover:bg-indigo-700 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Camera className="h-4 w-4" />
+              {decodeError ? "Retry — Take Another Photo" : "Open Camera to Scan QR"}
+            </button>
+          )}
+
+          {/* Decoding in progress — no button */}
+          {decoding && (
+            <button
+              disabled
+              className="w-full flex items-center justify-center gap-2.5 rounded-xl bg-indigo-100 py-3.5 text-sm font-semibold text-indigo-400 cursor-not-allowed"
+            >
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Decoding QR code…
+            </button>
+          )}
+
+          {/* Cancel */}
+          <button
+            type="button"
+            id="qr-scanner-cancel-btn"
+            onClick={onClose}
+            disabled={isSaving || decoding}
+            className="w-full rounded-xl bg-zinc-100 py-3 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Cancel
+          </button>
+        </div>
+
+        {/* ── Saving overlay (parent is writing to DB + firing deep-link) ── */}
         {isSaving && (
-          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 rounded-2xl bg-white/95 backdrop-blur-sm">
-            {/* Animated ring */}
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-5 rounded-2xl bg-white">
+            {/* Pulsing ring + icon */}
             <div className="relative flex items-center justify-center">
-              <div className="h-20 w-20 rounded-full border-4 border-indigo-100" />
-              <div className="absolute h-20 w-20 animate-spin rounded-full border-4 border-transparent border-t-indigo-600" />
-              <CheckCircle2 className="absolute h-8 w-8 text-indigo-600" />
+              <div className="h-24 w-24 rounded-full bg-indigo-50" />
+              <div className="absolute h-24 w-24 animate-spin rounded-full border-4 border-transparent border-t-indigo-500" />
+              <CheckCircle2 className="absolute h-10 w-10 text-indigo-600" />
             </div>
 
-            <div className="text-center">
-              <p className="text-base font-bold text-zinc-900">QR Scanned!</p>
-              <p className="mt-1 text-sm text-zinc-500 flex items-center justify-center gap-1.5">
+            <div className="text-center px-4">
+              <p className="text-base font-bold text-zinc-900">QR Code Read!</p>
+              <p className="mt-1.5 text-sm text-zinc-500 flex items-center justify-center gap-1.5">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Saving &amp; opening UPI payment…
+                Saving &amp; opening Google Pay…
               </p>
             </div>
 
-            {/* Amount badge */}
-            <div className="rounded-full bg-indigo-600 px-5 py-1.5 text-sm font-semibold text-white shadow-lg shadow-indigo-200">
+            <div className="rounded-full bg-indigo-600 px-6 py-2 text-sm font-bold text-white shadow-lg shadow-indigo-200">
               ₹{amount.toFixed(2)}
             </div>
           </div>
